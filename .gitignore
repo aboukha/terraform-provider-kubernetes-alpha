@@ -5,3 +5,4 @@
 *.log
 **/terraform-provider-kubernetes*
 /terraform-provider-kubernetes*
+.terraform.lock.hcl
