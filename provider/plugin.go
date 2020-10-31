@@ -24,12 +24,14 @@ var handshakeConfig = plugin.HandshakeConfig{
 
 // Serve is the default entrypoint for the provider.
 func Serve() {
+	server := tfprotov5server.New(RawProviderServer{})
+
 	plugin.Serve(&plugin.ServeConfig{
 		HandshakeConfig: handshakeConfig,
 		GRPCServer:      plugin.DefaultGRPCServer,
 		Plugins: plugin.PluginSet{
 			"provider": &grpcPlugin{
-				providerServer: &RawProviderServer{},
+				providerServer: server,
 			},
 		},
 	})

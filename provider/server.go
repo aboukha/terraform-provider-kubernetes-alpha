@@ -15,11 +15,10 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/hashicorp/go-cty/cty"
 	ctyjson "github.com/hashicorp/go-cty/cty/json"
-	"github.com/hashicorp/terraform-plugin-sdk/helper/logging"
-	"github.com/hashicorp/terraform-provider-kubernetes-alpha/tfplugin5"
-	"github.com/mitchellh/go-homedir"
-
 	"github.com/hashicorp/go-cty/cty/msgpack"
+	"github.com/hashicorp/terraform-plugin-go/tfprotov5"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/logging"
+	"github.com/mitchellh/go-homedir"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/install"
@@ -44,52 +43,34 @@ func init() {
 // RawProviderServer implements the ProviderServer interface as exported from ProtoBuf.
 type RawProviderServer struct{}
 
-// GetSchema function
-func (s *RawProviderServer) GetSchema(ctx context.Context, req *tfplugin5.GetProviderSchema_Request) (*tfplugin5.GetProviderSchema_Response, error) {
-
-	cfgSchema, err := GetProviderConfigSchema()
-	if err != nil {
-		return nil, fmt.Errorf("failed to construct provider schema: %s", err)
-	}
-	resSchema, err := GetProviderResourceSchema()
-	if err != nil {
-		return nil, fmt.Errorf("failed to construct resource schema: %s", err)
-	}
-	resp := &tfplugin5.GetProviderSchema_Response{
-		Provider:        cfgSchema,
-		ResourceSchemas: resSchema,
-	}
-	return resp, nil
-}
-
 // PrepareProviderConfig function
-func (s *RawProviderServer) PrepareProviderConfig(ctx context.Context, req *tfplugin5.PrepareProviderConfig_Request) (*tfplugin5.PrepareProviderConfig_Response, error) {
-	resp := &tfplugin5.PrepareProviderConfig_Response{}
+func (s *RawProviderServer) PrepareProviderConfig(ctx context.Context, req *tfprotov5.PrepareProviderConfigRequest) (*tfprotov5.PrepareProviderConfigResponse, error) {
+	resp := &tfprotov5.PrepareProviderConfigResponse{}
 
-	resp.Diagnostics = []*tfplugin5.Diagnostic{}
+	resp.Diagnostics = []*tfprotov5.Diagnostic{}
 
 	return resp, nil
 }
 
 // ValidateResourceTypeConfig function
-func (s *RawProviderServer) ValidateResourceTypeConfig(ctx context.Context, req *tfplugin5.ValidateResourceTypeConfig_Request) (*tfplugin5.ValidateResourceTypeConfig_Response, error) {
+func (s *RawProviderServer) ValidateResourceTypeConfig(ctx context.Context, req *tfprotov5.ValidateResourceTypeConfigRequest) (*tfprotov5.ValidateResourceTypeConfigResponse, error) {
 	//	Dlog.Printf("[ValidateResourceTypeConfig][Request]\n%s\n", spew.Sdump(*req))
 
-	config := &tfplugin5.ValidateResourceTypeConfig_Response{}
+	config := &tfprotov5.ValidateResourceTypeConfig_Response{}
 	return config, nil
 }
 
 // ValidateDataSourceConfig function
-func (s *RawProviderServer) ValidateDataSourceConfig(ctx context.Context, req *tfplugin5.ValidateDataSourceConfig_Request) (*tfplugin5.ValidateDataSourceConfig_Response, error) {
+func (s *RawProviderServer) ValidateDataSourceConfig(ctx context.Context, req *tfprotov5.ValidateDataSourceConfig_Request) (*tfprotov5.ValidateDataSourceConfigResponse, error) {
 	//	Dlog.Printf("[ValidateDataSourceConfig][Request]\n%s\n", spew.Sdump(*req))
 
 	return nil, status.Errorf(codes.Unimplemented, "method ValidateDataSourceConfig not implemented")
 }
 
 // UpgradeResourceState isn't really useful in this provider, but we have to loop the state back through to keep Terraform happy.
-func (s *RawProviderServer) UpgradeResourceState(ctx context.Context, req *tfplugin5.UpgradeResourceState_Request) (*tfplugin5.UpgradeResourceState_Response, error) {
-	resp := &tfplugin5.UpgradeResourceState_Response{}
-	resp.Diagnostics = []*tfplugin5.Diagnostic{}
+func (s *RawProviderServer) UpgradeResourceState(ctx context.Context, req *tfprotov5.UpgradeResourceStateRequest) (*tfprotov5.UpgradeResourceStateResponse, error) {
+	resp := &tfprotov5.UpgradeResourceStateResponse{}
+	resp.Diagnostics = []*tfprotov5.Diagnostic{}
 
 	sch, err := GetProviderResourceSchema()
 	if err != nil {
@@ -109,13 +90,13 @@ func (s *RawProviderServer) UpgradeResourceState(ctx context.Context, req *tfplu
 		resp.Diagnostics = AppendProtoDiag(resp.Diagnostics, err)
 		return resp, nil
 	}
-	resp.UpgradedState = &tfplugin5.DynamicValue{Msgpack: newStateMP}
+	resp.UpgradedState = &tfprotov5.DynamicValue{Msgpack: newStateMP}
 	return resp, nil
 }
 
-// Configure function
-func (s *RawProviderServer) Configure(ctx context.Context, req *tfplugin5.Configure_Request) (*tfplugin5.Configure_Response, error) {
-	response := &tfplugin5.Configure_Response{}
+// ConfigureProvider function
+func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov5.ConfigureRequest) (*tfprotov5.ConfigureResponse, error) {
+	response := &tfprotov5.ConfigureResponse{}
 	var err error
 
 	providerConfig, err := msgpack.Unmarshal(req.Config.Msgpack, getConfigObjectType())
@@ -123,7 +104,7 @@ func (s *RawProviderServer) Configure(ctx context.Context, req *tfplugin5.Config
 		return response, err
 	}
 
-	diags := []*tfplugin5.Diagnostic{}
+	diags := []*tfprotov5.Diagnostic{}
 
 	configPath := providerConfig.GetAttr("config_path")
 	if !configPath.IsNull() {
@@ -132,19 +113,11 @@ func (s *RawProviderServer) Configure(ctx context.Context, req *tfplugin5.Config
 			_, err = os.Stat(configPathAbs)
 		}
 		if err != nil {
-			diags = append(diags, &tfplugin5.Diagnostic{
-				Severity: tfplugin5.Diagnostic_INVALID,
-				Summary:  "Invalid attribute in provider configuration",
-				Detail:   "'config_path' refers to an invalid file path: " + configPathAbs,
-				Attribute: &tfplugin5.AttributePath{
-					Steps: []*tfplugin5.AttributePath_Step{
-						{
-							Selector: &tfplugin5.AttributePath_Step_AttributeName{
-								AttributeName: "config_path",
-							},
-						},
-					},
-				},
+			diags = append(diags, &tfprotov5.Diagnostic{
+				Severity:  tfprotov5.DiagnosticSeverityInvalid,
+				Summary:   "Invalid attribute in provider configuration",
+				Detail:    "'config_path' refers to an invalid file path: " + configPathAbs,
+				Attribute: &tfprotov5.AttributePath{}.WithAttributeName("config_path"),
 			})
 		}
 	}
@@ -153,14 +126,14 @@ func (s *RawProviderServer) Configure(ctx context.Context, req *tfplugin5.Config
 	if !host.IsNull() && host.IsKnown() {
 		_, err = url.ParseRequestURI(host.AsString())
 		if err != nil {
-			diags = append(diags, &tfplugin5.Diagnostic{
-				Severity: tfplugin5.Diagnostic_INVALID,
+			diags = append(diags, &tfprotov5.Diagnostic{
+				Severity: tfprotov5.DiagnosticSeverityInvalid,
 				Summary:  "Invalid attribute in provider configuration",
 				Detail:   "'host' is not a valid URL",
-				Attribute: &tfplugin5.AttributePath{
-					Steps: []*tfplugin5.AttributePath_Step{
+				Attribute: &tfprotov5.AttributePath{
+					Steps: []*tfprotov5.AttributePathStep{
 						{
-							Selector: &tfplugin5.AttributePath_Step_AttributeName{
+							Selector: &tfprotov5.AttributePath_Step_AttributeName{
 								AttributeName: "host",
 							},
 						},
@@ -174,19 +147,11 @@ func (s *RawProviderServer) Configure(ctx context.Context, req *tfplugin5.Config
 	if !pemCC.IsNull() && host.IsKnown() {
 		cc, _ := pem.Decode([]byte(pemCC.AsString()))
 		if cc == nil || cc.Type != "CERTIFICATE" {
-			diags = append(diags, &tfplugin5.Diagnostic{
-				Severity: tfplugin5.Diagnostic_INVALID,
-				Summary:  "Invalid attribute in provider configuration",
-				Detail:   "'client_certificate' is not a valid PEM encoded certificate",
-				Attribute: &tfplugin5.AttributePath{
-					Steps: []*tfplugin5.AttributePath_Step{
-						{
-							Selector: &tfplugin5.AttributePath_Step_AttributeName{
-								AttributeName: "client_certificate",
-							},
-						},
-					},
-				},
+			diags = append(diags, &tfprotov5.Diagnostic{
+				Severity:  tfprotov5.DiagnosticSeverityInvalid,
+				Summary:   "Invalid attribute in provider configuration",
+				Detail:    "'client_certificate' is not a valid PEM encoded certificate",
+				Attribute: &tfprotov5.AttributePath{}.WithAttributeName("client_certificate"),
 			})
 		}
 	}
@@ -195,19 +160,11 @@ func (s *RawProviderServer) Configure(ctx context.Context, req *tfplugin5.Config
 	if !pemCA.IsNull() && host.IsKnown() {
 		ca, _ := pem.Decode([]byte(pemCA.AsString()))
 		if ca == nil || ca.Type != "CERTIFICATE" {
-			diags = append(diags, &tfplugin5.Diagnostic{
-				Severity: tfplugin5.Diagnostic_INVALID,
-				Summary:  "Invalid attribute in provider configuration",
-				Detail:   "'cluster_ca_certificate' is not a valid PEM encoded certificate",
-				Attribute: &tfplugin5.AttributePath{
-					Steps: []*tfplugin5.AttributePath_Step{
-						{
-							Selector: &tfplugin5.AttributePath_Step_AttributeName{
-								AttributeName: "cluster_ca_certificate",
-							},
-						},
-					},
-				},
+			diags = append(diags, &tfprotov5.Diagnostic{
+				Severity:  tfprotov5.DiagnosticSeverityInvalid,
+				Summary:   "Invalid attribute in provider configuration",
+				Detail:    "'cluster_ca_certificate' is not a valid PEM encoded certificate",
+				Attribute: &tfprotov5.AttributePath{}.WithAttributeName("cluster_ca_certificate"),
 			})
 		}
 	}
@@ -216,19 +173,11 @@ func (s *RawProviderServer) Configure(ctx context.Context, req *tfplugin5.Config
 	if !pemCK.IsNull() && host.IsKnown() {
 		ck, _ := pem.Decode([]byte(pemCK.AsString()))
 		if ck == nil || !strings.Contains(ck.Type, "PRIVATE KEY") {
-			diags = append(diags, &tfplugin5.Diagnostic{
-				Severity: tfplugin5.Diagnostic_INVALID,
-				Summary:  "Invalid attribute in provider configuration",
-				Detail:   "'client_key' is not a valid PEM encoded private key",
-				Attribute: &tfplugin5.AttributePath{
-					Steps: []*tfplugin5.AttributePath_Step{
-						{
-							Selector: &tfplugin5.AttributePath_Step_AttributeName{
-								AttributeName: "client_key",
-							},
-						},
-					},
-				},
+			diags = append(diags, &tfprotov5.Diagnostic{
+				Severity:  tfprotov5.DiagnosticSeverityInvalid,
+				Summary:   "Invalid attribute in provider configuration",
+				Detail:    "'client_key' is not a valid PEM encoded private key",
+				Attribute: &tfprotov5.AttributePath{}.WithAttributeName("client_key"),
 			})
 		}
 	}
@@ -449,8 +398,8 @@ func (s *RawProviderServer) Configure(ctx context.Context, req *tfplugin5.Config
 }
 
 // ReadResource function
-func (s *RawProviderServer) ReadResource(ctx context.Context, req *tfplugin5.ReadResource_Request) (*tfplugin5.ReadResource_Response, error) {
-	resp := &tfplugin5.ReadResource_Response{}
+func (s *RawProviderServer) ReadResource(ctx context.Context, req *tfprotov5.ReadResource_Request) (*tfprotov5.ReadResource_Response, error) {
+	resp := &tfprotov5.ReadResourceResponse{}
 
 	currentState, err := UnmarshalResource(req.TypeName, req.GetCurrentState().GetMsgpack())
 	if err != nil {
@@ -494,8 +443,8 @@ func (s *RawProviderServer) ReadResource(ctx context.Context, req *tfplugin5.Rea
 		if k8serrors.IsNotFound(err) {
 			return resp, nil
 		}
-		d := tfplugin5.Diagnostic{
-			Severity: tfplugin5.Diagnostic_ERROR,
+		d := tfprotov5.Diagnostic{
+			Severity: tfprotov5.DiagnosticSeverityError,
 			Summary:  fmt.Sprintf("Cannot GET resource %s", spew.Sdump(co)),
 			Detail:   err.Error(),
 		}
@@ -527,13 +476,13 @@ func (s *RawProviderServer) ReadResource(ctx context.Context, req *tfplugin5.Rea
 	if err != nil {
 		return resp, err
 	}
-	resp.NewState = &tfplugin5.DynamicValue{Msgpack: newStatePacked}
+	resp.NewState = &tfprotov5.DynamicValue{Msgpack: newStatePacked}
 	return resp, nil
 }
 
 // PlanResourceChange function
-func (s *RawProviderServer) PlanResourceChange(ctx context.Context, req *tfplugin5.PlanResourceChange_Request) (*tfplugin5.PlanResourceChange_Response, error) {
-	resp := &tfplugin5.PlanResourceChange_Response{}
+func (s *RawProviderServer) PlanResourceChange(ctx context.Context, req *tfprotov5.PlanResourceChange_Request) (*tfprotov5.PlanResourceChange_Response, error) {
+	resp := &tfprotov5.PlanResourceChange_Response{}
 
 	proposedState, err := UnmarshalResource(req.TypeName, req.GetProposedNewState().GetMsgpack())
 	if err != nil {
@@ -567,8 +516,8 @@ func (s *RawProviderServer) PlanResourceChange(ctx context.Context, req *tfplugi
 
 	if err != nil {
 		resp.Diagnostics = append(resp.Diagnostics,
-			&tfplugin5.Diagnostic{
-				Severity: tfplugin5.Diagnostic_ERROR,
+			&tfprotov5.Diagnostic{
+				Severity: tfprotov5.DiagnosticSeverityError,
 				Summary:  err.Error(),
 			})
 		return resp, err
@@ -579,7 +528,7 @@ func (s *RawProviderServer) PlanResourceChange(ctx context.Context, req *tfplugi
 		return resp, err
 	}
 
-	resp.PlannedState = &tfplugin5.DynamicValue{
+	resp.PlannedState = &tfprotov5.DynamicValue{
 		Msgpack: plannedState,
 	}
 	return resp, nil
@@ -602,8 +551,8 @@ func (s *RawProviderServer) waitForCompletion(ctx context.Context, applyPlannedS
 }
 
 // ApplyResourceChange function
-func (s *RawProviderServer) ApplyResourceChange(ctx context.Context, req *tfplugin5.ApplyResourceChange_Request) (*tfplugin5.ApplyResourceChange_Response, error) {
-	resp := &tfplugin5.ApplyResourceChange_Response{}
+func (s *RawProviderServer) ApplyResourceChange(ctx context.Context, req *tfprotov5.ApplyResourceChangeRequest) (*tfprotov5.ApplyResourceChangeResponse, error) {
+	resp := &tfprotov5.ApplyResourceChange_Response{}
 
 	applyPlannedState, err := UnmarshalResource(req.TypeName, (*req.PlannedState).Msgpack)
 	if err != nil {
@@ -623,11 +572,11 @@ func (s *RawProviderServer) ApplyResourceChange(ctx context.Context, req *tfplug
 	c, err := GetDynamicClient()
 	if err != nil {
 		if resp.Diagnostics == nil {
-			resp.Diagnostics = make([]*tfplugin5.Diagnostic, 1)
+			resp.Diagnostics = make([]*tfprotov5.Diagnostic, 1)
 		}
 		resp.Diagnostics = append(resp.Diagnostics,
-			&tfplugin5.Diagnostic{
-				Severity: tfplugin5.Diagnostic_ERROR,
+			&tfprotov5.Diagnostic{
+				Severity: tfprotov5.Diagnostic_ERROR,
 				Summary:  err.Error(),
 			})
 		return resp, err
@@ -683,8 +632,8 @@ func (s *RawProviderServer) ApplyResourceChange(ctx context.Context, req *tfplug
 				Dlog.Printf("[ApplyResourceChange][Apply] Error: %s\n%s\n", spew.Sdump(err), spew.Sdump(result))
 				rn := types.NamespacedName{Namespace: rnamespace, Name: rname}.String()
 				resp.Diagnostics = append(resp.Diagnostics,
-					&tfplugin5.Diagnostic{
-						Severity: tfplugin5.Diagnostic_ERROR,
+					&tfprotov5.Diagnostic{
+						Severity: tfprotov5.DiagnosticSeverityError,
 						Detail:   err.Error(),
 						Summary:  fmt.Sprintf("PATCH resource %s failed: %s", rn, err),
 					})
@@ -716,7 +665,7 @@ func (s *RawProviderServer) ApplyResourceChange(ctx context.Context, req *tfplug
 			if err != nil {
 				return resp, err
 			}
-			resp.NewState = &tfplugin5.DynamicValue{Msgpack: mp}
+			resp.NewState = &tfprotov5.DynamicValue{Msgpack: mp}
 		}
 	case applyPlannedState.IsNull():
 		{ // Delete the resource
@@ -760,8 +709,8 @@ func (s *RawProviderServer) ApplyResourceChange(ctx context.Context, req *tfplug
 			if err != nil {
 				rn := types.NamespacedName{Namespace: rnamespace, Name: rname}.String()
 				resp.Diagnostics = append(resp.Diagnostics,
-					&tfplugin5.Diagnostic{
-						Severity: tfplugin5.Diagnostic_ERROR,
+					&tfprotov5.Diagnostic{
+						Severity: tfprotov5.Diagnostic_ERROR,
 						Detail:   err.Error(),
 						Summary:  fmt.Sprintf("DELETE resource %s failed: %s", rn, err),
 					})
@@ -781,7 +730,7 @@ func (s *RawProviderServer) ApplyResourceChange(ctx context.Context, req *tfplug
 }
 
 // ImportResourceState function
-func (*RawProviderServer) ImportResourceState(ctx context.Context, req *tfplugin5.ImportResourceState_Request) (*tfplugin5.ImportResourceState_Response, error) {
+func (*RawProviderServer) ImportResourceState(ctx context.Context, req *tfprotov5.ImportResourceState_Request) (*tfprotov5.ImportResourceState_Response, error) {
 	// Terraform only gives us the schema name of the resource and an ID string, as passed by the user on the command line.
 	// The ID should be a combination of a Kubernetes GRV and a namespace/name type of resource identifier.
 	// Without the user supplying the GRV there is no way to fully identify the resource when making the Get API call to K8s.
@@ -790,14 +739,14 @@ func (*RawProviderServer) ImportResourceState(ctx context.Context, req *tfplugin
 }
 
 // ReadDataSource function
-func (s *RawProviderServer) ReadDataSource(ctx context.Context, req *tfplugin5.ReadDataSource_Request) (*tfplugin5.ReadDataSource_Response, error) {
+func (s *RawProviderServer) ReadDataSource(ctx context.Context, req *tfprotov5.ReadDataSource_Request) (*tfprotov5.ReadDataSource_Response, error) {
 	//	Dlog.Printf("[ReadDataSource][Request]\n%s\n", spew.Sdump(*req))
 
 	return nil, status.Errorf(codes.Unimplemented, "method ReadDataSource not implemented")
 }
 
 // Stop function
-func (s *RawProviderServer) Stop(ctx context.Context, req *tfplugin5.Stop_Request) (*tfplugin5.Stop_Response, error) {
+func (s *RawProviderServer) Stop(ctx context.Context, req *tfprotov5.Stop_Request) (*tfprotov5.Stop_Response, error) {
 	//	Dlog.Printf("[Stop][Request]\n%s\n", spew.Sdump(*req))
 
 	return nil, status.Errorf(codes.Unimplemented, "method Stop not implemented")

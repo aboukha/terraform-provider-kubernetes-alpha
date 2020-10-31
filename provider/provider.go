@@ -9,7 +9,7 @@ import (
 
 // GetObjectTypeFromSchema returns a cty.Type that can wholy represent the schema input
 func GetObjectTypeFromSchema(schema *tfplugin5.Schema) (cty.Type, error) {
-	bm := map[string]cty.Type{}
+	bm := map[string]cty.Type{}``
 	for _, att := range schema.Block.Attributes {
 		var t cty.Type
 		err := t.UnmarshalJSON(att.Type)
@@ -22,20 +22,17 @@ func GetObjectTypeFromSchema(schema *tfplugin5.Schema) (cty.Type, error) {
 }
 
 // GetProviderResourceSchema contains the definitions of all supported resources
-func GetProviderResourceSchema() (map[string]*tfplugin5.Schema, error) {
+func GetProviderResourceSchema() map[string]*tfplugin5.Schema {
 	oType, err := cty.DynamicPseudoType.MarshalJSON()
-	if err != nil {
-		return nil, err
-	}
 
 	waitForType, err := cty.Object(map[string]cty.Type{
 		"fields": cty.Map(cty.String),
 	}).MarshalJSON()
 	if err != nil {
-		return nil, err
+		return nil
 	}
 
-	return map[string]*tfplugin5.Schema{
+	return map[string]*tfpro.Schema{
 		"kubernetes_manifest": {
 			Version: 1,
 			Block: &tfplugin5.Schema_Block{
@@ -62,5 +59,5 @@ func GetProviderResourceSchema() (map[string]*tfplugin5.Schema, error) {
 				},
 			},
 		},
-	}, nil
+	}
 }
