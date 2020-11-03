@@ -14,7 +14,7 @@ require (
 	github.com/hashicorp/hcl/v2 v2.0.0
 	github.com/hashicorp/terraform-exec v0.10.0
 	github.com/hashicorp/terraform-json v0.5.0
-	github.com/hashicorp/terraform-plugin-go v0.0.0-20201030231218-5e8aeb3ae852
+	github.com/hashicorp/terraform-plugin-go v0.1.0
 	github.com/hashicorp/terraform-plugin-sdk v1.4.1
 	github.com/hashicorp/terraform-plugin-test/v2 v2.1.2
 	github.com/hashicorp/yamux v0.0.0-20200609203250-aecfd211c9ce // indirect
