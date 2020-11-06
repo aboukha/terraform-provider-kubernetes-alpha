@@ -91,6 +91,6 @@ func GetProviderConfigSchema() *tfprotov5.Schema {
 
 	return &tfprotov5.Schema{
 		Version: 1,
-		Block:   b,
+		Block:   &b,
 	}
 }

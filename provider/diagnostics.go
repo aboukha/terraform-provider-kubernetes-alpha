@@ -1,5 +1,6 @@
 package provider
 
+/*
 import (
 	"github.com/hashicorp/go-cty/cty"
 	proto "github.com/hashicorp/terraform-provider-kubernetes-alpha/tfplugin5"
@@ -48,22 +49,6 @@ func AppendProtoDiag(diags []*proto.Diagnostic, d interface{}) []*proto.Diagnost
 	return diags
 }
 
-// AttributePathToPath takes the proto encoded path and converts it to a cty.Path
-func AttributePathToPath(ap *proto.AttributePath) cty.Path {
-	var p cty.Path
-	for _, step := range ap.Steps {
-		switch selector := step.Selector.(type) {
-		case *proto.AttributePath_Step_AttributeName:
-			p = p.GetAttr(selector.AttributeName)
-		case *proto.AttributePath_Step_ElementKeyString:
-			p = p.Index(cty.StringVal(selector.ElementKeyString))
-		case *proto.AttributePath_Step_ElementKeyInt:
-			p = p.Index(cty.NumberIntVal(selector.ElementKeyInt))
-		}
-	}
-	return p
-}
-
 // PathToAttributePath takes a cty.Path and converts it to a proto-encoded path.
 func PathToAttributePath(p cty.Path) *proto.AttributePath {
 	ap := &proto.AttributePath{}
@@ -100,3 +85,4 @@ func PathToAttributePath(p cty.Path) *proto.AttributePath {
 	}
 	return ap
 }
+*/

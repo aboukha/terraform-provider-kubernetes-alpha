@@ -1,5 +1,7 @@
 package provider
 
+/*
+
 import (
 	"context"
 	"fmt"
@@ -209,3 +211,4 @@ func FieldPathToCty(fieldPath string) (cty.Path, error) {
 
 	return path, nil
 }
+*/

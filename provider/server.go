@@ -3,6 +3,7 @@ package provider
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -14,10 +15,10 @@ import (
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/hashicorp/go-cty/cty"
-	ctyjson "github.com/hashicorp/go-cty/cty/json"
 	"github.com/hashicorp/go-cty/cty/msgpack"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov5"
-	"github.com/hashicorp/terraform-plugin-sdk/helper/logging"
+	"github.com/hashicorp/terraform-plugin-go/tfprotov5/tftypes"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/logging"
 	"github.com/mitchellh/go-homedir"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -56,12 +57,12 @@ func (s *RawProviderServer) PrepareProviderConfig(ctx context.Context, req *tfpr
 func (s *RawProviderServer) ValidateResourceTypeConfig(ctx context.Context, req *tfprotov5.ValidateResourceTypeConfigRequest) (*tfprotov5.ValidateResourceTypeConfigResponse, error) {
 	//	Dlog.Printf("[ValidateResourceTypeConfig][Request]\n%s\n", spew.Sdump(*req))
 
-	config := &tfprotov5.ValidateResourceTypeConfig_Response{}
+	config := &tfprotov5.ValidateResourceTypeConfigResponse{}
 	return config, nil
 }
 
 // ValidateDataSourceConfig function
-func (s *RawProviderServer) ValidateDataSourceConfig(ctx context.Context, req *tfprotov5.ValidateDataSourceConfig_Request) (*tfprotov5.ValidateDataSourceConfigResponse, error) {
+func (s *RawProviderServer) ValidateDataSourceConfig(ctx context.Context, req *tfprotov5.ValidateDataSourceConfigRequest) (*tfprotov5.ValidateDataSourceConfigResponse, error) {
 	//	Dlog.Printf("[ValidateDataSourceConfig][Request]\n%s\n", spew.Sdump(*req))
 
 	return nil, status.Errorf(codes.Unimplemented, "method ValidateDataSourceConfig not implemented")
@@ -72,37 +73,40 @@ func (s *RawProviderServer) UpgradeResourceState(ctx context.Context, req *tfpro
 	resp := &tfprotov5.UpgradeResourceStateResponse{}
 	resp.Diagnostics = []*tfprotov5.Diagnostic{}
 
-	sch, err := GetProviderResourceSchema()
+	sch := GetProviderResourceSchema()
+
+	rt := GetObjectTypeFromSchema(sch[req.TypeName])
+
+	rv := tftypes.Object(map[string]interface{})
+	err := json.Unmarshal(req.RawState.JSON, rv)
 	if err != nil {
-		return resp, err
-	}
-	rt, err := GetObjectTypeFromSchema(sch[req.TypeName])
-	if err != nil {
-		return resp, err
-	}
-	rv, err := ctyjson.Unmarshal(req.RawState.Json, rt)
-	if err != nil {
-		resp.Diagnostics = AppendProtoDiag(resp.Diagnostics, err)
+		resp.Diagnostics = append(resp.Diagnostics, &tfprotov5.Diagnostic{
+			Severity: tfprotov5.DiagnosticSeverityError,
+			Summary:  "Failed to decode old state during upgrade",
+			Detail:   err.Error(),
+		})
 		return resp, nil
 	}
-	newStateMP, err := msgpack.Marshal(rv, rt)
+	us, err := tfprotov5.NewDynamicValue(rt, rv)
 	if err != nil {
-		resp.Diagnostics = AppendProtoDiag(resp.Diagnostics, err)
-		return resp, nil
+		resp.Diagnostics = append(resp.Diagnostics, &tfprotov5.Diagnostic{
+			Severity: tfprotov5.DiagnosticSeverityError,
+			Summary:  "Failed to encode new state during upgrade",
+			Detail:   err.Error(),
+		})
 	}
-	resp.UpgradedState = &tfprotov5.DynamicValue{Msgpack: newStateMP}
+	resp.UpgradedState = &us
+
 	return resp, nil
 }
 
 // ConfigureProvider function
-func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov5.ConfigureRequest) (*tfprotov5.ConfigureResponse, error) {
-	response := &tfprotov5.ConfigureResponse{}
+func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov5.ConfigureProviderRequest) (*tfprotov5.ConfigureProviderResponse, error) {
+	response := &tfprotov5.ConfigureProviderResponse{}
 	var err error
 
-	providerConfig, err := msgpack.Unmarshal(req.Config.Msgpack, getConfigObjectType())
-	if err != nil {
-		return response, err
-	}
+	ct := getConfigObjectType()
+	providerConfig := msgpack.Unmarshal(req.Config.Msgpack)
 
 	diags := []*tfprotov5.Diagnostic{}
 
@@ -191,7 +195,7 @@ func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov
 
 	ssp := providerConfig.GetAttr("server_side_planning")
 	if !ssp.IsKnown() || ssp.IsNull() {
-		ssp = cty.True // default to true
+		ssp = tftypes.NewValue(tftype.Bool) // default to true
 	}
 	ps[SSPlanning] = ssp.True()
 
@@ -199,7 +203,7 @@ func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov
 	loader := &clientcmd.ClientConfigLoadingRules{}
 
 	if configPathEnv, ok := os.LookupEnv("KUBE_CONFIG_PATH"); ok && configPathEnv != "" {
-		configPath = cty.StringVal(configPathEnv)
+		configPath = tftypes.NewValue(tftypes.String, configPathEnv)
 	} else {
 		configPath = providerConfig.GetAttr("config_path")
 	}
@@ -211,9 +215,9 @@ func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov
 		loader.ExplicitPath = configPathAbs
 	}
 
-	var cfgContext cty.Value
+	var cfgContext tftypes.Value
 	if cfgContextEnv, ok := os.LookupEnv("KUBE_CTX"); ok && cfgContextEnv != "" {
-		cfgContext = cty.StringVal(cfgContextEnv)
+		cfgContext = tftypes.NewValue(tftypes.String, cfgContextEnv)
 	} else {
 		cfgContext = providerConfig.GetAttr("config_context")
 	}
@@ -223,9 +227,9 @@ func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov
 
 	overrides.Context = clientcmdapi.Context{}
 
-	var cfgCtxCluster cty.Value
+	var cfgCtxCluster tftypes.Value
 	if cfgCtxClusterEnv, ok := os.LookupEnv("KUBE_CTX_CLUSTER"); ok && cfgCtxClusterEnv != "" {
-		cfgCtxCluster = cty.StringVal(cfgCtxClusterEnv)
+		cfgCtxCluster = tftypes.NewValue(tftypes.String, cfgCtxClusterEnv)
 	} else {
 		cfgCtxCluster = providerConfig.GetAttr("config_context_cluster")
 	}
@@ -233,9 +237,9 @@ func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov
 		overrides.Context.Cluster = cfgCtxCluster.AsString()
 	}
 
-	var cfgContextAuthInfo cty.Value
+	var cfgContextAuthInfo tftypes.Value
 	if cfgContextAuthInfoEnv, ok := os.LookupEnv("KUBE_CTX_USER"); ok && cfgContextAuthInfoEnv != "" {
-		cfgContextAuthInfo = cty.StringVal(cfgContextAuthInfoEnv)
+		cfgContextAuthInfo = tftypes.NewValue(tftypes.String, cfgContextAuthInfoEnv)
 	} else {
 		cfgContextAuthInfo = providerConfig.GetAttr("config_context_user")
 	}
@@ -243,13 +247,13 @@ func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov
 		overrides.Context.AuthInfo = cfgContextAuthInfo.AsString()
 	}
 
-	var insecure cty.Value
+	var insecure tftypes.Value
 	if insecureEnv, ok := os.LookupEnv("KUBE_INSECURE"); ok && insecureEnv != "" {
 		iv, err := strconv.ParseBool(insecureEnv)
 		if err != nil {
 			return response, fmt.Errorf("failed to parse config value of 'insecure': %s", err)
 		}
-		insecure = cty.BoolVal(iv)
+		insecure = tftypes.NewValue(tftypes.Bool, iv)
 	} else {
 		insecure = providerConfig.GetAttr("insecure")
 	}
@@ -257,9 +261,9 @@ func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov
 		overrides.ClusterInfo.InsecureSkipTLSVerify = insecure.True()
 	}
 
-	var clusterCA cty.Value
+	var clusterCA tftypes.Value
 	if clusterCAEnv, ok := os.LookupEnv("KUBE_CLUSTER_CA_CERT_DATA"); ok && clusterCAEnv != "" {
-		clusterCA = cty.StringVal(clusterCAEnv)
+		clusterCA = tftypes.NewValue(tftypes.String, clusterCAEnv)
 	} else {
 		clusterCA = providerConfig.GetAttr("cluster_ca_certificate")
 	}
@@ -267,9 +271,9 @@ func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov
 		overrides.ClusterInfo.CertificateAuthorityData = bytes.NewBufferString(clusterCA.AsString()).Bytes()
 	}
 
-	var clientCrt cty.Value
+	var clientCrt tftypes.Value
 	if clientCrtEnv, ok := os.LookupEnv("KUBE_CLIENT_CERT_DATA"); ok && clientCrtEnv != "" {
-		clientCrt = cty.StringVal(clientCrtEnv)
+		clientCrt = tftypes.NewValue(tftypes.String, clientCrtEnv)
 	} else {
 		clientCrt = providerConfig.GetAttr("client_certificate")
 	}
@@ -277,9 +281,9 @@ func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov
 		overrides.AuthInfo.ClientCertificateData = bytes.NewBufferString(clientCrt.AsString()).Bytes()
 	}
 
-	var clientCrtKey cty.Value
+	var clientCrtKey tftypes.Value
 	if clientCrtKeyEnv, ok := os.LookupEnv("KUBE_CLIENT_KEY_DATA"); ok && clientCrtKeyEnv != "" {
-		clientCrtKey = cty.StringVal(clientCrtKeyEnv)
+		clientCrtKey = tftypes.NewValue(tftypes.String, clientCrtKeyEnv)
 	} else {
 		clientCrtKey = providerConfig.GetAttr("client_key")
 	}
@@ -288,7 +292,7 @@ func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov
 	}
 
 	if hostEnv, ok := os.LookupEnv("KUBE_HOST"); ok && hostEnv != "" {
-		host = cty.StringVal(hostEnv)
+		host = tftypes.NewValue(tftypes.String, hostEnv)
 	} else {
 		host = providerConfig.GetAttr("host")
 	}
@@ -307,9 +311,9 @@ func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov
 		overrides.ClusterInfo.Server = hostURL.String()
 	}
 
-	var username cty.Value
+	var username tftypes.Value
 	if usernameEnv, ok := os.LookupEnv("KUBE_USERNAME"); ok && usernameEnv != "" {
-		username = cty.StringVal(usernameEnv)
+		username = tftypes.NewValue(tftypes.String, usernameEnv)
 	} else {
 		username = providerConfig.GetAttr("username")
 	}
@@ -317,9 +321,9 @@ func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov
 		overrides.AuthInfo.Username = username.AsString()
 	}
 
-	var password cty.Value
+	var password tftypes.Value
 	if passwordEnv, ok := os.LookupEnv("KUBE_PASSWORD"); ok && passwordEnv != "" {
-		password = cty.StringVal(passwordEnv)
+		password = tftypes.NewValue(tftypes.String, passwordEnv)
 	} else {
 		password = providerConfig.GetAttr("password")
 	}
@@ -327,9 +331,9 @@ func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov
 		overrides.AuthInfo.Password = password.AsString()
 	}
 
-	var token cty.Value
+	var token tftypes.Value
 	if tokenEnv, ok := os.LookupEnv("KUBE_TOKEN"); ok && tokenEnv != "" {
-		token = cty.StringVal(tokenEnv)
+		token = tftypes.NewValue(tftypes.String, tokenEnv)
 	} else {
 		token = providerConfig.GetAttr("token")
 	}
@@ -398,7 +402,7 @@ func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov
 }
 
 // ReadResource function
-func (s *RawProviderServer) ReadResource(ctx context.Context, req *tfprotov5.ReadResource_Request) (*tfprotov5.ReadResource_Response, error) {
+func (s *RawProviderServer) ReadResource(ctx context.Context, req *tfprotov5.ReadResourceRequest) (*tfprotov5.ReadResourceResponse, error) {
 	resp := &tfprotov5.ReadResourceResponse{}
 
 	currentState, err := UnmarshalResource(req.TypeName, req.GetCurrentState().GetMsgpack())
@@ -481,7 +485,7 @@ func (s *RawProviderServer) ReadResource(ctx context.Context, req *tfprotov5.Rea
 }
 
 // PlanResourceChange function
-func (s *RawProviderServer) PlanResourceChange(ctx context.Context, req *tfprotov5.PlanResourceChange_Request) (*tfprotov5.PlanResourceChange_Response, error) {
+func (s *RawProviderServer) PlanResourceChange(ctx context.Context, req *tfprotov5.PlanResourceChangeRequest) (*tfprotov5.PlanResourceChangeResponse, error) {
 	resp := &tfprotov5.PlanResourceChange_Response{}
 
 	proposedState, err := UnmarshalResource(req.TypeName, req.GetProposedNewState().GetMsgpack())
@@ -504,7 +508,7 @@ func (s *RawProviderServer) PlanResourceChange(ctx context.Context, req *tfproto
 	}
 
 	ps := GetGlobalState()
-	var planned cty.Value
+	var planned tftypes.Value
 
 	if ps[SSPlanning].(bool) {
 		planned, err = PlanUpdateResourceServerSide(ctx, &proposedState)
@@ -512,7 +516,7 @@ func (s *RawProviderServer) PlanResourceChange(ctx context.Context, req *tfproto
 		planned, err = PlanUpdateResourceLocal(ctx, &proposedState)
 	}
 
-	Dlog.Printf("[PlanResourceChange] planned state cty: %s\n", spew.Sdump(planned))
+	Dlog.Printf("[PlanResourceChange] planned state: %s\n", spew.Sdump(planned))
 
 	if err != nil {
 		resp.Diagnostics = append(resp.Diagnostics,
@@ -534,7 +538,8 @@ func (s *RawProviderServer) PlanResourceChange(ctx context.Context, req *tfproto
 	return resp, nil
 }
 
-func (s *RawProviderServer) waitForCompletion(ctx context.Context, applyPlannedState cty.Value, rs dynamic.ResourceInterface, rname string, rtype cty.Type) error {
+/*
+func (s *RawProviderServer) waitForCompletion(ctx context.Context, applyPlannedState tftypes.Value, rs dynamic.ResourceInterface, rname string, rtype tftypes.Type) error {
 	if applyPlannedState.IsNull() {
 		return nil
 	}
@@ -549,7 +554,7 @@ func (s *RawProviderServer) waitForCompletion(ctx context.Context, applyPlannedS
 	}
 	return waiter.Wait(ctx)
 }
-
+*/
 // ApplyResourceChange function
 func (s *RawProviderServer) ApplyResourceChange(ctx context.Context, req *tfprotov5.ApplyResourceChangeRequest) (*tfprotov5.ApplyResourceChangeResponse, error) {
 	resp := &tfprotov5.ApplyResourceChange_Response{}
@@ -648,10 +653,10 @@ func (s *RawProviderServer) ApplyResourceChange(ctx context.Context, req *tfprot
 			}
 			Dlog.Printf("[ApplyResourceChange][Apply][CtyResponse]\n%s\n", spew.Sdump(newResObject))
 
-			err = s.waitForCompletion(ctx, applyPlannedState, rs, rname, tsch)
-			if err != nil {
-				return resp, err
-			}
+			// err = s.waitForCompletion(ctx, applyPlannedState, rs, rname, tsch)
+			// if err != nil {
+			// 	return resp, err
+			// }
 
 			newResState, err := cty.Transform(sanitizedPlannedState,
 				ResourceDeepUpdateObjectAttr(cty.GetAttrPath("object"), &newResObject),
@@ -717,10 +722,10 @@ func (s *RawProviderServer) ApplyResourceChange(ctx context.Context, req *tfprot
 				return resp, fmt.Errorf("DELETE resource %s failed: %s", rn, err)
 			}
 
-			err = s.waitForCompletion(ctx, applyPlannedState, rs, rname, tsch)
-			if err != nil {
-				return resp, err
-			}
+			// err = s.waitForCompletion(ctx, applyPlannedState, rs, rname, tsch)
+			// if err != nil {
+			// 	return resp, err
+			// }
 
 			resp.NewState = req.PlannedState
 		}
@@ -730,7 +735,7 @@ func (s *RawProviderServer) ApplyResourceChange(ctx context.Context, req *tfprot
 }
 
 // ImportResourceState function
-func (*RawProviderServer) ImportResourceState(ctx context.Context, req *tfprotov5.ImportResourceState_Request) (*tfprotov5.ImportResourceState_Response, error) {
+func (*RawProviderServer) ImportResourceState(ctx context.Context, req *tfprotov5.ImportResourceStateRequest) (*tfprotov5.ImportResourceStateResponse, error) {
 	// Terraform only gives us the schema name of the resource and an ID string, as passed by the user on the command line.
 	// The ID should be a combination of a Kubernetes GRV and a namespace/name type of resource identifier.
 	// Without the user supplying the GRV there is no way to fully identify the resource when making the Get API call to K8s.
@@ -739,14 +744,14 @@ func (*RawProviderServer) ImportResourceState(ctx context.Context, req *tfprotov
 }
 
 // ReadDataSource function
-func (s *RawProviderServer) ReadDataSource(ctx context.Context, req *tfprotov5.ReadDataSource_Request) (*tfprotov5.ReadDataSource_Response, error) {
+func (s *RawProviderServer) ReadDataSource(ctx context.Context, req *tfprotov5.ReadDataSourceRequest) (*tfprotov5.ReadDataSourceResponse, error) {
 	//	Dlog.Printf("[ReadDataSource][Request]\n%s\n", spew.Sdump(*req))
 
 	return nil, status.Errorf(codes.Unimplemented, "method ReadDataSource not implemented")
 }
 
-// Stop function
-func (s *RawProviderServer) Stop(ctx context.Context, req *tfprotov5.Stop_Request) (*tfprotov5.Stop_Response, error) {
+// StopProvider function
+func (s *RawProviderServer) StopProvider(ctx context.Context, req *tfprotov5.StopProviderRequest) (*tfprotov5.StopProviderResponse, error) {
 	//	Dlog.Printf("[Stop][Request]\n%s\n", spew.Sdump(*req))
 
 	return nil, status.Errorf(codes.Unimplemented, "method Stop not implemented")
