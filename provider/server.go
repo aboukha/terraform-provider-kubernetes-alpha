@@ -15,7 +15,6 @@ import (
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/hashicorp/go-cty/cty"
-	"github.com/hashicorp/go-cty/cty/msgpack"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov5"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov5/tftypes"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/logging"
@@ -47,25 +46,19 @@ type RawProviderServer struct{}
 // PrepareProviderConfig function
 func (s *RawProviderServer) PrepareProviderConfig(ctx context.Context, req *tfprotov5.PrepareProviderConfigRequest) (*tfprotov5.PrepareProviderConfigResponse, error) {
 	resp := &tfprotov5.PrepareProviderConfigResponse{}
-
-	resp.Diagnostics = []*tfprotov5.Diagnostic{}
-
 	return resp, nil
 }
 
 // ValidateResourceTypeConfig function
 func (s *RawProviderServer) ValidateResourceTypeConfig(ctx context.Context, req *tfprotov5.ValidateResourceTypeConfigRequest) (*tfprotov5.ValidateResourceTypeConfigResponse, error) {
-	//	Dlog.Printf("[ValidateResourceTypeConfig][Request]\n%s\n", spew.Sdump(*req))
-
-	config := &tfprotov5.ValidateResourceTypeConfigResponse{}
-	return config, nil
+	resp := &tfprotov5.ValidateResourceTypeConfigResponse{}
+	return resp, nil
 }
 
 // ValidateDataSourceConfig function
 func (s *RawProviderServer) ValidateDataSourceConfig(ctx context.Context, req *tfprotov5.ValidateDataSourceConfigRequest) (*tfprotov5.ValidateDataSourceConfigResponse, error) {
-	//	Dlog.Printf("[ValidateDataSourceConfig][Request]\n%s\n", spew.Sdump(*req))
-
-	return nil, status.Errorf(codes.Unimplemented, "method ValidateDataSourceConfig not implemented")
+	resp := &tfprotov5.ValidateDataSourceConfigResponse{}
+	return resp, nil
 }
 
 // UpgradeResourceState isn't really useful in this provider, but we have to loop the state back through to keep Terraform happy.
@@ -103,85 +96,262 @@ func (s *RawProviderServer) UpgradeResourceState(ctx context.Context, req *tfpro
 // ConfigureProvider function
 func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov5.ConfigureProviderRequest) (*tfprotov5.ConfigureProviderResponse, error) {
 	response := &tfprotov5.ConfigureProviderResponse{}
+	diags := []*tfprotov5.Diagnostic{}
 	var err error
 
-	ct := getConfigObjectType()
-	providerConfig := msgpack.Unmarshal(req.Config.Msgpack)
+	ps := GetGlobalState()
 
-	diags := []*tfprotov5.Diagnostic{}
+	// transform provider config schema into tftype.Type and unmarshal the given config into a tftypes.Value
+	cfgType := GetTypeFromSchema(GetProviderConfigSchema())
+	providerConfig, err := req.Config.Unmarshal(cfgType)
+	if err != nil {
+		response.Diagnostics = append(response.Diagnostics, &tfprotov5.Diagnostic{
+			Severity: tfprotov5.DiagnosticSeverityError,
+			Summary:  "Failed to configure provider",
+			Detail:   err.Error(),
+		})
+		return response, err
+	}
 
-	configPath := providerConfig.GetAttr("config_path")
-	if !configPath.IsNull() {
-		configPathAbs, err := homedir.Expand(configPath.AsString())
+	// Handle 'config_path' attribute
+	//
+	var configPath string
+	attPath := tftypes.AttributePath{}
+	attPath.WithAttributeName("config_path")
+	configPathAtt, attPath, err := tftypes.WalkAttributePath(providerConfig, attPath)
+	if err != nil {
+		// invalid attribute path - this shouldn't happen, bail out for now
+		response.Diagnostics = append(response.Diagnostics, &tfprotov5.Diagnostic{
+			Severity: tfprotov5.DiagnosticSeverityError,
+			Summary:  "Provider configuration: failed to extract 'config_path' value",
+			Detail:   err.Error(),
+		})
+		return response, err
+	}
+	configPathVal, ok := configPathAtt.(tftypes.Value)
+	if !ok {
+		// invalid config_path type - this shouldn't happen, bail out for now
+		response.Diagnostics = append(response.Diagnostics, &tfprotov5.Diagnostic{
+			Severity: tfprotov5.DiagnosticSeverityError,
+			Summary:  "Provider configuration: failed to assert type of 'config_path' value",
+			Detail:   err.Error(),
+		})
+		return response, err
+	}
+	if !configPathVal.IsNull() && configPathVal.IsKnown() {
+		err = configPathVal.As(configPath)
+		if err != nil {
+			diags = append(diags, &tfprotov5.Diagnostic{
+				Severity:  tfprotov5.DiagnosticSeverityInvalid,
+				Summary:   "Invalid attribute in provider configuration",
+				Detail:    "'config_path' type cannot be asserted: " + err.Error(),
+				Attribute: &attPath,
+			})
+		}
+		configPath, err := homedir.Expand(configPath)
 		if err == nil {
-			_, err = os.Stat(configPathAbs)
+			_, err = os.Stat(configPath)
 		}
 		if err != nil {
 			diags = append(diags, &tfprotov5.Diagnostic{
 				Severity:  tfprotov5.DiagnosticSeverityInvalid,
 				Summary:   "Invalid attribute in provider configuration",
-				Detail:    "'config_path' refers to an invalid file path: " + configPathAbs,
-				Attribute: &tfprotov5.AttributePath{}.WithAttributeName("config_path"),
+				Detail:    "'config_path' refers to an invalid file path: " + configPath,
+				Attribute: &attPath,
 			})
 		}
 	}
 
-	host := providerConfig.GetAttr("host")
-	if !host.IsNull() && host.IsKnown() {
-		_, err = url.ParseRequestURI(host.AsString())
+	// Handle 'host' attribute
+	//
+	var host string
+	attPath = tftypes.AttributePath{}
+	attPath.WithAttributeName("host")
+	hostAtt, attPath, err := tftypes.WalkAttributePath(providerConfig, attPath)
+	if err != nil {
+		// invalid attribute path - this shouldn't happen, bail out for now
+		response.Diagnostics = append(response.Diagnostics, &tfprotov5.Diagnostic{
+			Severity:  tfprotov5.DiagnosticSeverityError,
+			Summary:   "Provider configuration: failed to extract 'host' value",
+			Detail:    err.Error(),
+			Attribute: &attPath,
+		})
+		return response, err
+	}
+	hostVal, ok := hostAtt.(tftypes.Value)
+	if !ok {
+		// invalid attribute type - this shouldn't happen, bail out for now
+		response.Diagnostics = append(response.Diagnostics, &tfprotov5.Diagnostic{
+			Severity:  tfprotov5.DiagnosticSeverityError,
+			Summary:   "Provider configuration: failed to assert type of 'host' value",
+			Detail:    err.Error(),
+			Attribute: &attPath,
+		})
+		return response, err
+	}
+	if !hostVal.IsNull() && hostVal.IsKnown() {
+		err = hostVal.As(host)
 		if err != nil {
 			diags = append(diags, &tfprotov5.Diagnostic{
-				Severity: tfprotov5.DiagnosticSeverityInvalid,
-				Summary:  "Invalid attribute in provider configuration",
-				Detail:   "'host' is not a valid URL",
-				Attribute: &tfprotov5.AttributePath{
-					Steps: []*tfprotov5.AttributePathStep{
-						{
-							Selector: &tfprotov5.AttributePath_Step_AttributeName{
-								AttributeName: "host",
-							},
-						},
-					},
-				},
+				Severity:  tfprotov5.DiagnosticSeverityInvalid,
+				Summary:   "Invalid attribute in provider configuration",
+				Detail:    "'host' type cannot be asserted: " + err.Error(),
+				Attribute: &attPath,
+			})
+			return response, err
+		}
+		_, err = url.ParseRequestURI(host)
+		if err != nil {
+			diags = append(diags, &tfprotov5.Diagnostic{
+				Severity:  tfprotov5.DiagnosticSeverityInvalid,
+				Summary:   "Invalid attribute in provider configuration",
+				Detail:    "'host' is not a valid URL",
+				Attribute: &attPath,
 			})
 		}
 	}
 
-	pemCC := providerConfig.GetAttr("client_certificate")
-	if !pemCC.IsNull() && host.IsKnown() {
-		cc, _ := pem.Decode([]byte(pemCC.AsString()))
+	// Handle 'client_certificate' attribute
+	//
+	var clientCertificate string
+	attPath = tftypes.AttributePath{}
+	attPath.WithAttributeName("client_certificate")
+	clientCertificateAtt, attPath, err := tftypes.WalkAttributePath(providerConfig, attPath)
+	if err != nil {
+		// invalid attribute path - this shouldn't happen, bail out for now
+		response.Diagnostics = append(response.Diagnostics, &tfprotov5.Diagnostic{
+			Severity:  tfprotov5.DiagnosticSeverityError,
+			Summary:   "Provider configuration: failed to extract 'client_certificate' value",
+			Detail:    err.Error(),
+			Attribute: &attPath,
+		})
+		return response, err
+	}
+	clientCertificateVal, ok := clientCertificateAtt.(tftypes.Value)
+	if !ok {
+		// invalid attribute type - this shouldn't happen, bail out for now
+		response.Diagnostics = append(response.Diagnostics, &tfprotov5.Diagnostic{
+			Severity:  tfprotov5.DiagnosticSeverityError,
+			Summary:   "Provider configuration: failed to assert type of 'client_certificate' value",
+			Detail:    err.Error(),
+			Attribute: &attPath,
+		})
+		return response, err
+	}
+	if !clientCertificateVal.IsNull() && clientCertificateVal.IsKnown() {
+		err = clientCertificateVal.As(clientCertificate)
+		if err != nil {
+			diags = append(diags, &tfprotov5.Diagnostic{
+				Severity:  tfprotov5.DiagnosticSeverityInvalid,
+				Summary:   "Invalid attribute in provider configuration",
+				Detail:    "'client_certificate' type cannot be asserted: " + err.Error(),
+				Attribute: &attPath,
+			})
+			return response, err
+		}
+		cc, _ := pem.Decode([]byte(clientCertificate))
 		if cc == nil || cc.Type != "CERTIFICATE" {
 			diags = append(diags, &tfprotov5.Diagnostic{
 				Severity:  tfprotov5.DiagnosticSeverityInvalid,
 				Summary:   "Invalid attribute in provider configuration",
 				Detail:    "'client_certificate' is not a valid PEM encoded certificate",
-				Attribute: &tfprotov5.AttributePath{}.WithAttributeName("client_certificate"),
+				Attribute: &attPath,
 			})
 		}
 	}
 
-	pemCA := providerConfig.GetAttr("cluster_ca_certificate")
-	if !pemCA.IsNull() && host.IsKnown() {
-		ca, _ := pem.Decode([]byte(pemCA.AsString()))
+	// Handle 'cluster_ca_certificate' attribute
+	//
+	var clusterCaCertificate string
+	attPath = tftypes.AttributePath{}
+	attPath.WithAttributeName("cluster_ca_certificate")
+	clusterCaCertificateAtt, attPath, err := tftypes.WalkAttributePath(providerConfig, attPath)
+	if err != nil {
+		// invalid attribute type - this shouldn't happen, bail out for now
+		response.Diagnostics = append(response.Diagnostics, &tfprotov5.Diagnostic{
+			Severity:  tfprotov5.DiagnosticSeverityError,
+			Summary:   "Provider configuration: failed to extract 'cluster_ca_certificate' value",
+			Detail:    err.Error(),
+			Attribute: &attPath,
+		})
+		return response, err
+	}
+	clusterCaCertificateVal, ok := clusterCaCertificateAtt.(tftypes.Value)
+	if !ok {
+		// invalid attribute type - this shouldn't happen, bail out for now
+		response.Diagnostics = append(response.Diagnostics, &tfprotov5.Diagnostic{
+			Severity:  tfprotov5.DiagnosticSeverityError,
+			Summary:   "Provider configuration: failed to assert type of 'cluster_ca_certificate' value",
+			Detail:    err.Error(),
+			Attribute: &attPath,
+		})
+		return response, err
+	}
+	if !clusterCaCertificateVal.IsNull() && clusterCaCertificateVal.IsKnown() {
+		err = clusterCaCertificateVal.As(clusterCaCertificate)
+		if err != nil {
+			diags = append(diags, &tfprotov5.Diagnostic{
+				Severity:  tfprotov5.DiagnosticSeverityInvalid,
+				Summary:   "Invalid attribute in provider configuration",
+				Detail:    "'cluster_ca_certificate' type cannot be asserted: " + err.Error(),
+				Attribute: &attPath,
+			})
+			return response, err
+		}
+		ca, _ := pem.Decode([]byte(clusterCaCertificate))
 		if ca == nil || ca.Type != "CERTIFICATE" {
 			diags = append(diags, &tfprotov5.Diagnostic{
 				Severity:  tfprotov5.DiagnosticSeverityInvalid,
 				Summary:   "Invalid attribute in provider configuration",
 				Detail:    "'cluster_ca_certificate' is not a valid PEM encoded certificate",
-				Attribute: &tfprotov5.AttributePath{}.WithAttributeName("cluster_ca_certificate"),
+				Attribute: &attPath,
 			})
 		}
 	}
 
-	pemCK := providerConfig.GetAttr("client_key")
-	if !pemCK.IsNull() && host.IsKnown() {
-		ck, _ := pem.Decode([]byte(pemCK.AsString()))
+	var clientKey string
+	attPath = tftypes.AttributePath{}
+	attPath.WithAttributeName("client_key")
+	clientKeyAtt, attPath, err := tftypes.WalkAttributePath(providerConfig, attPath)
+	if err != nil {
+		// invalid attribute type - this shouldn't happen, bail out for now
+		response.Diagnostics = append(response.Diagnostics, &tfprotov5.Diagnostic{
+			Severity:  tfprotov5.DiagnosticSeverityError,
+			Summary:   "Provider configuration: failed to extract 'client_key' value",
+			Detail:    err.Error(),
+			Attribute: &attPath,
+		})
+		return response, err
+	}
+	clientKeyVal, ok := clientKeyAtt.(tftypes.Value)
+	if !ok {
+		// invalid attribute type - this shouldn't happen, bail out for now
+		response.Diagnostics = append(response.Diagnostics, &tfprotov5.Diagnostic{
+			Severity:  tfprotov5.DiagnosticSeverityError,
+			Summary:   "Provider configuration: failed to assert type of 'client_key' value",
+			Detail:    err.Error(),
+			Attribute: &attPath,
+		})
+		return response, err
+	}
+	if !clientKeyVal.IsNull() && clientKeyVal.IsKnown() {
+		err = clientKeyVal.As(clientKey)
+		if err != nil {
+			diags = append(diags, &tfprotov5.Diagnostic{
+				Severity:  tfprotov5.DiagnosticSeverityInvalid,
+				Summary:   "Invalid attribute in provider configuration",
+				Detail:    "'client_key' type cannot be asserted: " + err.Error(),
+				Attribute: &attPath,
+			})
+			return response, err
+		}
+		ck, _ := pem.Decode([]byte(clientKey))
 		if ck == nil || !strings.Contains(ck.Type, "PRIVATE KEY") {
 			diags = append(diags, &tfprotov5.Diagnostic{
 				Severity:  tfprotov5.DiagnosticSeverityInvalid,
 				Summary:   "Invalid attribute in provider configuration",
 				Detail:    "'client_key' is not a valid PEM encoded private key",
-				Attribute: &tfprotov5.AttributePath{}.WithAttributeName("client_key"),
+				Attribute: &attPath,
 			})
 		}
 	}
@@ -191,21 +361,31 @@ func (s *RawProviderServer) ConfigureProvider(ctx context.Context, req *tfprotov
 		return response, errors.New("failed to validate provider configuration")
 	}
 
-	ps := GetGlobalState()
-
-	ssp := providerConfig.GetAttr("server_side_planning")
-	if !ssp.IsKnown() || ssp.IsNull() {
-		ssp = tftypes.NewValue(tftype.Bool) // default to true
+	var ssp bool
+	attPath = tftypes.AttributePath{}
+	attPath.WithAttributeName("server_side_planning")
+	sspAtt, attPath, err := tftypes.WalkAttributePath(providerConfig, attPath)
+	sspVal, ok := sspAtt.(tftypes.Value)
+	if !ok {
+		// invalid attribute type - this shouldn't happen, bail out for now
+		response.Diagnostics = append(response.Diagnostics, &tfprotov5.Diagnostic{
+			Severity:  tfprotov5.DiagnosticSeverityError,
+			Summary:   "Provider configuration: failed to assert type of 'server_side_planning' value",
+			Detail:    err.Error(),
+			Attribute: &attPath,
+		})
+		return response, err
 	}
-	ps[SSPlanning] = ssp.True()
+	if !sspVal.IsKnown() || sspVal.IsNull() {
+		ssp = false // default to false
+	}
+	ps[SSPlanning] = ssp
 
 	overrides := &clientcmd.ConfigOverrides{}
 	loader := &clientcmd.ClientConfigLoadingRules{}
 
 	if configPathEnv, ok := os.LookupEnv("KUBE_CONFIG_PATH"); ok && configPathEnv != "" {
 		configPath = tftypes.NewValue(tftypes.String, configPathEnv)
-	} else {
-		configPath = providerConfig.GetAttr("config_path")
 	}
 	if !configPath.IsNull() && configPath.IsKnown() {
 		configPathAbs, err := homedir.Expand(configPath.AsString())

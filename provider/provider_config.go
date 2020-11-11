@@ -94,3 +94,14 @@ func GetProviderConfigSchema() *tfprotov5.Schema {
 		Block:   &b,
 	}
 }
+
+// GetTypeFromSchema returns the equivalent tftypes.Type representation of a given tfprotov5.Schema
+func GetTypeFromSchema(s *tfprotov5.Schema) tftypes.Type {
+	schemaTypeAttributes := map[string]tftypes.Type{}
+	for att := range s.Block.Attributes {
+		schemaTypeAttributes[att.Name] = att.Type
+	}
+	return tftypes.Object{
+		AttributeTypes: schemaTypeAttributes,
+	}
+}
